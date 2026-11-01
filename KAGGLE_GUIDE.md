@@ -66,24 +66,50 @@ Run the following cell to install R prerequisites (required for `mclust` cluster
 
 ### Step 4: Run a Model
 
-You can run any of the three models directly:
+You can run any of the three models directly, with full CLI argument support for quick testing:
 
-#### Option A: Run SpatialGlue
+#### Fast Test (e.g. Dataset 0 and Seed 0):
+To quickly test any model on just **Dataset 0** with **Seed 0**:
+```bash
+# ARISE:
+!python new-scripts/arise.py --dataset 0 --seed 0
+
+# SMART:
+!python new-scripts/smart.py --dataset 0 --seed 0
+
+# SpatialGlue:
+!python new-scripts/spatialGlue.py --dataset 0 --seed 0
+```
+
+#### Run Specific Datasets and Seeds:
+```bash
+# Run datasets 0 and 1 with seeds 42 and 0:
+!python new-scripts/arise.py --dataset_indices 0 1 --seeds 42 0
+```
+
+#### Run Full Benchmark (All 6 Datasets & 9 Seeds):
+If no flags are passed, the scripts run all 6 datasets across all 9 seeds:
 ```bash
 !python new-scripts/spatialGlue.py
-```
-
-#### Option B: Run SMART
-```bash
 !python new-scripts/smart.py
-```
-
-#### Option C: Run ARISE
-```bash
 !python new-scripts/arise.py
 ```
 
-> **Tip (Fast Test)**: To test a single dataset before running all 6, open the script and set `DATASET_INDICES = [0]` (runs `10x_human_lymph_node_A1`). By default, `DATASET_INDICES = [0, 1, 2, 3, 4, 5]` runs all 6 datasets.
+| Flag | Description | Example |
+|---|---|---|
+| `--dataset` | Single dataset index (0 to 5) | `--dataset 0` |
+| `--dataset_indices` | Space-separated dataset indices | `--dataset_indices 0 1 2` |
+| `--seed` | Single seed | `--seed 0` |
+| `--seeds` | Space-separated seeds | `--seeds 42 0 7` |
+| `--output_dir` | Custom output folder | `--output_dir my_test_run` |
+
+**Dataset Index Mapping**:
+- `0`: `10x_human_lymph_node_A1`
+- `1`: `10x_human_lymph_node_D1`
+- `2`: `Mouse_Brain_E11_S1`
+- `3`: `Mouse_Brain_E13_S1`
+- `4`: `Mouse_Brain_E15_S1`
+- `5`: `Mouse_Brain_E18_S1`
 
 ---
 
