@@ -1209,34 +1209,38 @@ choices = [
 # Select which datasets to run (indices 0 to 5)
 DATASET_INDICES = [0, 1, 2, 3, 4, 5]
 
-# Define seeds to loop over
-SEEDS = [
-    13,
-    2560,
-    641,
-    1892,
-    1173,
-    69,
-    2024,
-    231,
-    1971,
-    2497,
-    338,
-    3127,
-    2001,
-    2022,
-    574,
-    2428,
-    999,
-    1187,
-    42,
-    3999
-]
+# Define exact seeds to loop over
+SEEDS = [42, 0, 7, 123, 1234, 2022, 2023, 2024, 1337]
+
+MODEL_NAME = "SMART"
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", f"{MODEL_NAME}_outputs")
+RESULTS_DIR = os.path.join(OUTPUT_DIR, "results")
+VISUALS_DIR = os.path.join(OUTPUT_DIR, "visuals")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(VISUALS_DIR, exist_ok=True)
 
 # Set R_HOME and path before any rpy2 operations
 import os
-os.environ['R_HOME'] = '/usr/lib/R'
-os.environ['PATH'] = '/usr/lib/R/bin:' + os.environ['PATH']
+import subprocess
+import time
+
+if 'R_HOME' not in os.environ:
+    for candidate in ['/usr/lib/R', '/usr/local/lib/R', '/opt/R']:
+        if os.path.exists(candidate):
+            os.environ['R_HOME'] = candidate
+            break
+    if 'R_HOME' not in os.environ:
+        try:
+            r_home_det = subprocess.check_output(['R', 'RHOME'], text=True).strip()
+            if r_home_det and os.path.exists(r_home_det):
+                os.environ['R_HOME'] = r_home_det
+        except Exception:
+            os.environ['R_HOME'] = '/usr/lib/R'
+
+if 'R_HOME' in os.environ and os.path.exists(os.path.join(os.environ['R_HOME'], 'bin')):
+    r_bin = os.path.join(os.environ['R_HOME'], 'bin')
+    if r_bin not in os.environ.get('PATH', ''):
+        os.environ['PATH'] = r_bin + ':' + os.environ.get('PATH', '')
 
 # Import rpy2 and setup mclust
 import rpy2.robjects as robjects
@@ -1269,12 +1273,15 @@ from sklearn.metrics import (
     adjusted_mutual_info_score,
     homogeneity_score,
     v_measure_score,
-    silhouette_score
+    silhouette_score,
+    calinski_harabasz_score,
+    davies_bouldin_score
 )
 from sklearn.preprocessing import LabelEncoder
 from sklearn.decomposition import PCA
 
 all_results = []
+all_dataset_adata = {}
 tool = 'mclust'  # mclust, leiden, and louvain
 
 for dataset_idx in DATASET_INDICES:
@@ -1305,7 +1312,17 @@ for dataset_idx in DATASET_INDICES:
     # Check if files already exist locally before triggering download
     if not os.path.exists(rna_path) or not os.path.exists(other_path) or not os.path.exists(annotation_path):
         print(f"Downloading dataset files into: {base}")
-        os.system(f'gdown --folder "{folder_url}" --output "{base}"')
+        gdown_cmd = ".venv/bin/gdown" if os.path.exists(".venv/bin/gdown") else "gdown"
+        os.system(f'{gdown_cmd} --folder "{folder_url}" --output "{base}" --remaining-ok')
+        # If gdown created a subfolder, flatten files into base
+        for root, dirs, files in os.walk(base):
+            if root != base:
+                for f in files:
+                    src = os.path.join(root, f)
+                    dst = os.path.join(base, f)
+                    if not os.path.exists(dst):
+                        import shutil
+                        shutil.move(src, dst)
     else:
         print(f"Dataset files already exist at {base}. Skipping download.")
 
@@ -1358,10 +1375,16 @@ for dataset_idx in DATASET_INDICES:
     print(f"Number of ground truth classes: {n_ground_truth}")
     n_cluster = n_ground_truth
 
+    best_ari = -1.0
+    best_seed = None
+    best_adata = None
+
     for seed in SEEDS:
         print(f"\n" + "-"*60)
         print(f" Dataset: {dataset_name} | Seed: {seed} ".center(60, "-"))
         print("-"*60)
+
+        seed_start_time = time.time()
 
         # 1. Set seed
         set_seed(seed)
@@ -1393,6 +1416,8 @@ for dataset_idx in DATASET_INDICES:
         # 5. Clustering
         clustering(adata_omics1, key='SMART', add_key='SMART', n_clusters=n_cluster, method=tool, use_pca=True)
 
+        duration_sec = round(time.time() - seed_start_time, 2)
+
         # 6. Score Generating
         adata = adata_omics1.copy()
         if 'anno' not in adata.obs.columns and 'ground_truth' in adata.obs.columns:
@@ -1407,15 +1432,30 @@ for dataset_idx in DATASET_INDICES:
         homogeneity = homogeneity_score(y_true, y_pred)
         v_measure = v_measure_score(y_true, y_pred)
 
-        # Calculate Silhouette Score
         joint_feat = adata.obsm['SMART']
-        sil_score = silhouette_score(
-            joint_feat,
-            adata.obs['SMART'].astype(int)
-        )
+        le = LabelEncoder()
+        y_pred_int = le.fit_transform(y_pred)
+
+        # Calculate Silhouette Score
+        try:
+            sil_score = float(silhouette_score(joint_feat, y_pred_int))
+        except Exception:
+            sil_score = float('nan')
+
+        # Calculate Calinski-Harabasz Index (CHI)
+        try:
+            chi_score = float(calinski_harabasz_score(joint_feat, y_pred_int))
+        except Exception:
+            chi_score = float('nan')
+
+        # Calculate Davies-Bouldin Index (DBI)
+        try:
+            dbi_score = float(davies_bouldin_score(joint_feat, y_pred_int))
+        except Exception:
+            dbi_score = float('nan')
 
         print(f"\nResult for dataset: {dataset_name} | seed: {seed}")
-        print(f"ARI: {ari:.4f} | NMI: {nmi:.4f} | Silhouette: {sil_score:.4f}")
+        print(f"ARI: {ari:.4f} | NMI: {nmi:.4f} | Silhouette: {sil_score:.4f} | CHI: {chi_score:.2f} | DBI: {dbi_score:.4f} | Duration: {duration_sec:.2f}s")
 
         # Store seed results
         res_dict = {
@@ -1426,10 +1466,24 @@ for dataset_idx in DATASET_INDICES:
             'AMI': ami,
             'Homogeneity': homogeneity,
             'V-measure': v_measure,
-            'Silhouette': sil_score
+            'Silhouette': sil_score,
+            'CHI': chi_score,
+            'DBI': dbi_score,
+            'Duration': duration_sec
         }
         dataset_results.append(res_dict)
         all_results.append(res_dict)
+
+        # Track best seed AnnData for cross-dataset visualizations
+        if ari > best_ari or best_adata is None:
+            best_ari = ari
+            best_seed = seed
+            best_adata = adata_omics1.copy()
+            best_adata.obsm['spatial'] = adata_omics1.obsm['spatial']
+            best_adata.obsm[f'{MODEL_NAME}_emb'] = adata_omics1.obsm['SMART'].copy()
+            best_adata.obs[f'{MODEL_NAME}_domain'] = adata_omics1.obs['SMART'].copy()
+            best_adata.obs['domain'] = adata_omics1.obs['SMART'].copy()
+            best_adata.uns['selected_seed'] = best_seed
 
         # ------------------ Plotting & Visualization ------------------
         fig, ax_list = plt.subplots(1, 3, figsize=(11, 3))
@@ -1441,10 +1495,19 @@ for dataset_idx in DATASET_INDICES:
         sc.pl.embedding(adata, basis='spatial', color='anno', ax=ax_list[2], title='anno', s=20, show=False)
         plt.tight_layout(w_pad=0.3)
 
+        seed_plots_dir = os.path.join(VISUALS_DIR, "seed_plots", dataset_name)
+        os.makedirs(seed_plots_dir, exist_ok=True)
         os.makedirs(f"plots/{dataset_name}", exist_ok=True)
-        plot_path = f"plots/{dataset_name}/umap_seed_{seed}.png"
-        plt.savefig(plot_path, dpi=150)
+        plt.savefig(f"{seed_plots_dir}/umap_seed_{seed}.png", dpi=150)
+        plt.savefig(f"plots/{dataset_name}/umap_seed_{seed}.png", dpi=150)
         plt.close(fig)
+
+    # Store best AnnData
+    if best_adata is not None:
+        all_dataset_adata[dataset_name] = best_adata
+        best_h5ad_path = os.path.join(RESULTS_DIR, f"{MODEL_NAME}_adata_{dataset_name}.h5ad")
+        best_adata.write_h5ad(best_h5ad_path)
+        print(f"[Saved] Best-ARI seed ({best_seed}) AnnData saved to: {best_h5ad_path}")
 
     # Write dataset summary statistics and save csv for this dataset
     df_ds = pd.DataFrame(dataset_results)
@@ -1459,7 +1522,7 @@ for dataset_idx in DATASET_INDICES:
 
     # Generate text summary with Mean ± SD format for this dataset
     summary_lines = [f"Summary Stats for {dataset_name}:"]
-    metrics_list = ['ARI', 'NMI', 'AMI', 'Homogeneity', 'V-measure', 'Silhouette']
+    metrics_list = ['ARI', 'NMI', 'AMI', 'Homogeneity', 'V-measure', 'Silhouette', 'CHI', 'DBI', 'Duration']
     for metric in metrics_list:
         mean_val = df_ds[metric].mean()
         std_val = df_ds[metric].std()
@@ -1469,21 +1532,24 @@ for dataset_idx in DATASET_INDICES:
     print(dataset_summary_str)
     print("="*80)
 
-    os.makedirs("results", exist_ok=True)
-
     # Save the text summary for this dataset
-    with open(f"results/summary_{dataset_name}.txt", "w") as f:
+    with open(os.path.join(RESULTS_DIR, f"summary_{dataset_name}.txt"), "w") as f:
         f.write(dataset_summary_str)
 
+    df_ds.to_csv(os.path.join(RESULTS_DIR, f"metrics_{dataset_name}.csv"), index=False)
+    # Also save to root results/ for compatibility
+    os.makedirs("results", exist_ok=True)
     df_ds.to_csv(f"results/metrics_{dataset_name}.csv", index=False)
-    print(f"Saved dataset metrics to 'results/metrics_{dataset_name}.csv'")
-    print(f"Saved dataset summary to 'results/summary_{dataset_name}.txt'")
+    with open(f"results/summary_{dataset_name}.txt", "w") as f:
+        f.write(dataset_summary_str)
+    print(f"Saved dataset metrics to '{RESULTS_DIR}/metrics_{dataset_name}.csv'")
+    print(f"Saved dataset summary to '{RESULTS_DIR}/summary_{dataset_name}.txt'")
 
     # Generate publication-quality boxplot + stripplot for this dataset
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(14, 6))
     df_ds_long = df_ds.melt(
         id_vars=['seed'],
-        value_vars=metrics_list,
+        value_vars=['ARI', 'NMI', 'AMI', 'Homogeneity', 'V-measure', 'Silhouette'],
         var_name='Metric',
         value_name='Score'
     )
@@ -1506,27 +1572,30 @@ for dataset_idx in DATASET_INDICES:
         size=5,
         ax=ax
     )
-    plt.title(f"Variability of Metrics across 20 Seeds ({dataset_name})", fontsize=14, pad=15)
+    plt.title(f"Variability of Metrics across {len(SEEDS)} Seeds ({dataset_name})", fontsize=14, pad=15)
     plt.xlabel("Metric", fontsize=12, labelpad=10)
     plt.ylabel("Score", fontsize=12, labelpad=10)
     plt.ylim(0, 1.05)
     plt.tight_layout()
 
-    boxplot_path = f"results/boxplot_{dataset_name}.png"
+    boxplot_path = os.path.join(VISUALS_DIR, f"boxplot_{dataset_name}.png")
     plt.savefig(boxplot_path, dpi=300)
+    plt.savefig(f"results/boxplot_{dataset_name}.png", dpi=300)
     plt.close()
     print(f"Saved variability boxplot to '{boxplot_path}'\n")
 
 # -------------------------------------- Global Summary statistics ---------------------------------------
 
 df_all = pd.DataFrame(all_results)
-os.makedirs("results", exist_ok=True)
+df_all.to_csv(os.path.join(RESULTS_DIR, f"{MODEL_NAME}_benchmark_results.csv"), index=False)
+df_all.to_csv(os.path.join(RESULTS_DIR, "metrics_all_datasets.csv"), index=False)
 df_all.to_csv("results/metrics_all_datasets.csv", index=False)
+df_all.to_csv(f"results/{MODEL_NAME}_all_results.csv", index=False)
 
 # Compile global text summary
 global_summary_lines = [
     "="*80,
-    "GLOBAL SUMMARY: MEAN ± STD ACROSS 20 SEEDS",
+    f"GLOBAL SUMMARY: MEAN ± STD ACROSS {len(SEEDS)} SEEDS ({MODEL_NAME})",
     "="*80
 ]
 
@@ -1534,7 +1603,7 @@ for d_name in df_all['dataset'].unique():
     df_d = df_all[df_all['dataset'] == d_name]
     global_summary_lines.append(f"\nDataset: {d_name}")
     global_summary_lines.append("-" * len(f"Dataset: {d_name}"))
-    for metric in ['ARI', 'NMI', 'AMI', 'Homogeneity', 'V-measure', 'Silhouette']:
+    for metric in ['ARI', 'NMI', 'AMI', 'Homogeneity', 'V-measure', 'Silhouette', 'CHI', 'DBI', 'Duration']:
         mean_val = df_d[metric].mean()
         std_val = df_d[metric].std()
         global_summary_lines.append(f"{metric} = {mean_val:.4f} ± {std_val:.4f}")
@@ -1543,16 +1612,18 @@ global_summary_lines.append("\n" + "="*80)
 global_summary_str = "\n".join(global_summary_lines)
 print(global_summary_str)
 
-summary_stats_path = "results/summary_statistics.txt"
+summary_stats_path = os.path.join(RESULTS_DIR, f"{MODEL_NAME}_summary_statistics.txt")
 with open(summary_stats_path, "w") as f:
+    f.write(global_summary_str)
+with open("results/summary_statistics.txt", "w") as f:
     f.write(global_summary_str)
 
 print("\n" + "#"*80)
 print(" GLOBAL RESULTS ACROSS ALL DATASETS ".center(80, "#"))
 print("#"*80)
-print(df_all.groupby('dataset').mean())
+print(df_all.groupby('dataset')[['ARI', 'NMI', 'Silhouette', 'CHI', 'DBI', 'Duration']].mean())
 print("#"*80)
-print(f"Saved combined metrics to 'results/metrics_all_datasets.csv'")
+print(f"Saved combined metrics to '{RESULTS_DIR}/{MODEL_NAME}_benchmark_results.csv'")
 print(f"Saved global summary statistics to '{summary_stats_path}'")
 
 # Generate comparative global boxplot across all datasets
@@ -1594,11 +1665,34 @@ for i, metric in enumerate(metrics_list):
     axes[i].set_xticklabels(axes[i].get_xticklabels(), rotation=45, ha='right')
     axes[i].set_ylim(0, 1.05)
 
-plt.suptitle("Performance Comparison Across All Datasets & 20 Seeds", fontsize=18, y=0.98)
+plt.suptitle(f"{MODEL_NAME}: Performance Comparison Across All Datasets & {len(SEEDS)} Seeds", fontsize=18, y=0.98)
 plt.tight_layout()
-global_plot_path = "results/global_boxplot_comparison.png"
+global_plot_path = os.path.join(VISUALS_DIR, f"{MODEL_NAME}_global_boxplot_comparison.png")
 plt.savefig(global_plot_path, dpi=300)
+plt.savefig("results/global_boxplot_comparison.png", dpi=300)
 plt.close()
 print(f"Saved global comparison boxplot to '{global_plot_path}'")
+
+# -------------------------------------------------------------------------------------------------
+# EXECUTE FULL VISUALIZATION SUITE (Exactly matching visualization-add.txt)
+# -------------------------------------------------------------------------------------------------
+try:
+    from visualizations import run_all_visualizations
+except ImportError:
+    import sys
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from visualizations import run_all_visualizations
+
+print("\n" + "="*85)
+print(f" GENERATING PUBLICATION VISUALIZATION SUITE ({MODEL_NAME}) ".center(85, "="))
+print("="*85)
+run_all_visualizations(
+    model_name=MODEL_NAME,
+    output_dir=OUTPUT_DIR,
+    df_results=df_all,
+    loaded_adatas=all_dataset_adata,
+    choices=choices,
+    dataset_indices=DATASET_INDICES
+)
 
 # -------------------------------------- End ---------------------------------------

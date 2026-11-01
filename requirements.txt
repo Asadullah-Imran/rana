@@ -1,0 +1,26 @@
+# Deep learning & GNN frameworks
+torch>=2.0.0
+torchvision
+torchaudio
+torch-geometric>=2.3.0
+
+# Single-cell & spatial transcriptomics
+scanpy>=1.9.0
+anndata>=0.8.0
+scikit-misc
+
+# Machine learning & scientific computing
+scikit-learn>=1.2.0
+scipy>=1.9.0
+pandas>=1.5.0
+numpy>=1.23.0
+
+# Plotting & visualization
+matplotlib>=3.6.0
+seaborn>=0.12.0
+
+# R bridge (for mclust clustering in SMART & SpatialGlue)
+rpy2>=3.5.0
+
+# Google Drive data download
+gdown>=4.7.0
