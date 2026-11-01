@@ -885,7 +885,7 @@ def set_seed(seed=2024):
     os.environ['PYTHONHASHSEED'] = str(seed)
 
 # Set parameters.
-parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser(description="Run ARISE multimodal spatial clustering benchmark")
 parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
 parser.add_argument('--hidden_dim', type=int, default=512)
 parser.add_argument('--out_dim', type=int, default=64)
@@ -896,6 +896,11 @@ parser.add_argument('--delta', type=float, default=1)
 parser.add_argument('--dropout', type=float, default=0)
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--epochs', type=int, default=350)
+parser.add_argument('--dataset', type=int, default=None, help="Single dataset index to run (0 to 5)")
+parser.add_argument('--dataset_indices', type=int, nargs='+', default=None, help="List of dataset indices (e.g. --dataset_indices 0 1)")
+parser.add_argument('--seed', type=int, default=None, help="Single seed to run (e.g. --seed 0)")
+parser.add_argument('--seeds', type=int, nargs='+', default=None, help="List of seeds to run (e.g. --seeds 42 0 7)")
+parser.add_argument('--output_dir', type=str, default=None, help="Custom output directory")
 
 # Set device to GPU if available, otherwise use CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -919,14 +924,24 @@ choices = [
      "https://drive.google.com/drive/folders/1Xj1LNIAY93biS6JIMKNRODn5GvtCKADB"),
 ]
 
-# Select which datasets to run (indices 0 to 5)
-DATASET_INDICES = [0, 1, 2, 3, 4, 5]
+# Parse dataset selection
+if args.dataset is not None:
+    DATASET_INDICES = [args.dataset]
+elif args.dataset_indices is not None:
+    DATASET_INDICES = args.dataset_indices
+else:
+    DATASET_INDICES = [0, 1, 2, 3, 4, 5]
 
-# Define exact seeds to loop over
-SEEDS = [42, 0, 7, 123, 1234, 2022, 2023, 2024, 1337]
+# Parse seed selection
+if args.seed is not None:
+    SEEDS = [args.seed]
+elif args.seeds is not None:
+    SEEDS = args.seeds
+else:
+    SEEDS = [42, 0, 7, 123, 1234, 2022, 2023, 2024, 1337]
 
 MODEL_NAME = "ARISE"
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", f"{MODEL_NAME}_outputs")
+OUTPUT_DIR = args.output_dir if args.output_dir else os.getenv("OUTPUT_DIR", f"{MODEL_NAME}_outputs")
 RESULTS_DIR = os.path.join(OUTPUT_DIR, "results")
 VISUALS_DIR = os.path.join(OUTPUT_DIR, "visuals")
 os.makedirs(RESULTS_DIR, exist_ok=True)
