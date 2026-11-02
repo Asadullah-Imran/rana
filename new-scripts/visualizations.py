@@ -110,6 +110,10 @@ def plot_cross_seed_linearity(df_results, model_name, visuals_dir):
     save_path = os.path.join(visuals_dir, f"{model_name}_cross_seed_linearity.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"\n[Saved] Unified cross-seed linearity figure saved to: {save_path}")
+    try:
+        plt.show()
+    except Exception:
+        pass
     plt.close(fig)
 
 
@@ -212,6 +216,10 @@ def plot_spatial_domains_and_attention(loaded_adatas, df_results, model_name, vi
     save_path = os.path.join(visuals_dir, f"{model_name}_spatial_domains_and_attention.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"\n[Saved] Unified spatial domains & attention map figure ({n_datasets} datasets) saved to: {save_path}")
+    try:
+        plt.show()
+    except Exception:
+        pass
     plt.close(fig)
 
 
@@ -335,6 +343,10 @@ def plot_latent_umap_manifold(loaded_adatas, df_results, model_name, visuals_dir
     save_path = os.path.join(visuals_dir, f"{model_name}_latent_umap.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"\n[Saved] Unified latent UMAP manifold figure saved to: {save_path}")
+    try:
+        plt.show()
+    except Exception:
+        pass
     plt.close(fig)
 
 
@@ -410,12 +422,39 @@ def run_all_visualizations(model_name, output_dir=None, df_results=None, loaded_
     print(f" ALL VISUALIZATION SUITES COMPLETED FOR {model_name} ")
     print("="*85 + "\n")
 
+    # Automatically display figures in notebook output/logs if running in Jupyter / Kaggle
+    display_all_visuals(visuals_dir)
+
+
+def display_all_visuals(visuals_dir):
+    """
+    Renders generated image figures directly in notebook cell output logs.
+    """
+    import glob
+    try:
+        from IPython.display import Image, display
+        img_files = sorted(glob.glob(os.path.join(visuals_dir, "*.png")))
+        if len(img_files) > 0:
+            print("\n" + "="*85)
+            print(" DISPLAYING VISUAL FIGURES IN CELL OUTPUT ".center(85, "="))
+            print("="*85)
+            for f in img_files:
+                print(f"\n▶ Figure: {os.path.basename(f)}")
+                display(Image(filename=f, width=1000))
+    except Exception:
+        pass
+
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Run visualization suites matching visualization-add.txt")
     parser.add_argument('--model', type=str, default='SpatialGlue', choices=['ARISE', 'SMART', 'SpatialGlue'])
     parser.add_argument('--output_dir', type=str, default=None)
+    parser.add_argument('--display', action='store_true', help="Display generated images in notebook")
     args = parser.parse_args()
 
     run_all_visualizations(args.model, args.output_dir)
+    if args.display:
+        out_dir = args.output_dir if args.output_dir else f"{args.model}_outputs"
+        display_all_visuals(os.path.join(out_dir, "visuals"))
+

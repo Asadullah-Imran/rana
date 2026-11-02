@@ -113,7 +113,32 @@ If no flags are passed, the scripts run all 6 datasets across all 9 seeds:
 
 ---
 
-### Step 5: Output Structure & Visualization Artifacts
+### Step 5: How to See Visuals / Images in the Logs
+
+In Kaggle notebooks, there are two easy ways to view the generated figures right inside your notebook output/logs:
+
+#### Method A (Recommended: Auto-display inline with `%run`):
+Instead of bash `!python`, use the IPython magic `%run`:
+```python
+%run new-scripts/arise.py --dataset 0 --seed 0
+```
+*Why this is great*: `%run` executes inside the notebook session, so all figures (`*_cross_seed_linearity.png`, `*_spatial_domains_and_attention.png`, `*_latent_umap.png`) automatically render inline directly in your cell output!
+
+#### Method B (Display saved images after `!python` execution):
+If you ran `!python new-scripts/arise.py --dataset 0 --seed 0`, display all generated figures in the very next notebook cell:
+```python
+from IPython.display import Image, display
+import glob
+
+# Display all generated figures in notebook cell logs
+for img_path in sorted(glob.glob("*_outputs/visuals/*.png")):
+    print(f"\n[Figure Log] {img_path}")
+    display(Image(filename=img_path, width=950))
+```
+
+---
+
+### Step 6: Output Structure & Visualization Artifacts
 
 After execution, all files are saved in `/kaggle/working/result-analysis/` under:
 
@@ -135,7 +160,7 @@ SpatialGlue_outputs/
 
 ---
 
-### Step 6: Download Results from Kaggle
+### Step 7: Download Results from Kaggle
 
 To package all results and figures into a single downloadable zip file, run:
 
