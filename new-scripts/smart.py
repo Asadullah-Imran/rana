@@ -1187,6 +1187,11 @@ def train_SMART_MS(
 # warnings.filterwarnings('ignore')
 # Environment configuration. SMART pacakge can be implemented with either CPU or GPU. GPU acceleration is highly recommend for imporoved efficiency.
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+print(f"\n[Hardware] Compute Engine: {device}")
+if torch.cuda.is_available():
+    print(f"[Hardware] GPU: {torch.cuda.get_device_name(0)} | VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB\n")
+else:
+    print("[Hardware] No GPU detected. Running on CPU.\n")
 
 
 
