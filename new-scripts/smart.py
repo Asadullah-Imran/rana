@@ -114,6 +114,7 @@ def Mutual_Nearest_Neighbors(adata, key=None, n_nearest_neighbors=1, farthest_ra
         adata_sampled = adata.copy()
 
     X = adata_sampled.X if key is None else adata_sampled.obsm[key]
+    X = np.ascontiguousarray(X)
     distances = pairwise_distances(X)
     same_count = (distances == 0).sum(axis=1)
     print('Distances calculation completed!')
@@ -363,18 +364,18 @@ def pca(adata, use_reps=None, n_comps=10):
         PCA-reduced features of shape [n_samples, n_comps].
     """
     from sklearn.decomposition import PCA
-    from scipy.sparse import csc_matrix, csr_matrix
+    import scipy.sparse as sp
 
     pca = PCA(n_components=n_comps)
     if use_reps is not None:
         feat_pca = pca.fit_transform(adata.obsm[use_reps])
     else:
-        if isinstance(adata.X, (csc_matrix, csr_matrix)):
+        if sp.issparse(adata.X):
             feat_pca = pca.fit_transform(adata.X.toarray())
         else:
             feat_pca = pca.fit_transform(adata.X)
 
-    return feat_pca
+    return np.ascontiguousarray(feat_pca, dtype=np.float32)
 
 
 def mclust_R(adata, num_cluster, modelNames='EEE', used_obsm='emb_pca', random_seed=2020):
@@ -1385,8 +1386,8 @@ for dataset_idx in DATASET_INDICES:
     Cal_Spatial_Net(adata_omics2, model="KNN", n_neighbors=6)
 
     adata_list = [adata_omics1, adata_omics2]
-    x = [torch.FloatTensor(adata.obsm["feat"]).to(device) for adata in adata_list]
-    edges = [torch.LongTensor(adata.uns["edgeList"]).to(device) for adata in adata_list]
+    x = [torch.FloatTensor(np.ascontiguousarray(adata.obsm["feat"], dtype=np.float32)).to(device) for adata in adata_list]
+    edges = [torch.LongTensor(np.ascontiguousarray(adata.uns["edgeList"], dtype=np.int64)).to(device) for adata in adata_list]
 
     # ------------------ Seed Iterations ------------------
     dataset_results = []
