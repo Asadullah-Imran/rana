@@ -176,7 +176,7 @@ You can then download `benchmark_outputs.zip` directly from Kaggle's right-hand 
 
 ---
 
-### Step 7: Re-rendering Visualizations Standalone
+### Step 8: Re-rendering Visualizations Standalone
 
 If you want to re-generate the figures from saved CSVs and `.h5ad` files without re-training:
 ```bash
