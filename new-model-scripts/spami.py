@@ -610,37 +610,16 @@ def train_spami(omics1_data, omics2_data, dataset, device,
 
 
 # ================================================================================================
-# 5. CLUSTERING (Leiden clustering matching official utils.py & Tutorials 1-4)
+# 5. CLUSTERING (exact fixed Leiden clustering from source-code/SpaMI-main/SpaMI/utils.py & Tutorial_1)
 # ================================================================================================
 
-def search_leiden_res(adata, n_clusters, use_rep='X', n_neighbors=50,
-                      start=0.1, end=3.0, increment=0.05, random_state=0):
+def cluster_spami(adata, resolution=1.0, use_pca=False, n_comps=20, n_neighbors=50):
     """
-    Search Leiden resolution to match target number of ground-truth clusters,
-    using official SpaMI neighbor graph settings (n_neighbors=50).
-    """
-    sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=use_rep)
-    best_res = start
-    best_diff = float('inf')
-
-    for res in np.arange(start, end + 1e-9, increment):
-        sc.tl.leiden(adata, random_state=random_state, resolution=float(res))
-        n_found = adata.obs['leiden'].nunique()
-        diff = abs(n_found - n_clusters)
-        if diff < best_diff:
-            best_diff = diff
-            best_res = float(res)
-        if n_found == n_clusters:
-            return float(res)
-
-    return best_res
-
-
-def cluster_spami(adata, n_clusters, use_pca=False, n_comps=20, n_neighbors=50, random_state=0):
-    """
-    Perform Leiden clustering on SpaMI joint embedding (matching Tutorial_1 & Tutorial_3).
-      - MISAR (out_dim=20): use_pca=False, use_rep='SpaMI' (matches Tutorial_1.ipynb Cell 20)
-      - 10x HLN (out_dim=64): use_pca=True (n_comps=20), use_rep='X_pca' (matches Tutorial_3.ipynb Cell 20 & utils.py)
+    Perform official SpaMI Leiden clustering on joint embedding (no ground-truth leakage):
+      - MISAR (out_dim=20): sc.pp.neighbors(n_neighbors=50, use_rep='SpaMI') + sc.tl.leiden(resolution=1)
+        (matches Tutorial_1.ipynb Cell 20)
+      - 10x HLN (out_dim=64): sc.pp.pca(n_comps=20) + sc.pp.neighbors(n_neighbors=50, use_rep='X_pca')
+        + sc.tl.leiden(resolution=1) (matches utils.py:16-19)
     """
     if use_pca:
         emb_adata = AnnData(adata.obsm['SpaMI'].copy())
@@ -650,16 +629,10 @@ def cluster_spami(adata, n_clusters, use_pca=False, n_comps=20, n_neighbors=50, 
     else:
         use_rep = 'SpaMI'
 
-    res = search_leiden_res(
-        adata,
-        n_clusters=n_clusters,
-        use_rep=use_rep,
-        n_neighbors=n_neighbors,
-        random_state=random_state,
-    )
-    sc.tl.leiden(adata, random_state=random_state, resolution=res)
+    sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=use_rep)
+    sc.tl.leiden(adata, resolution=resolution)
     adata.obs['SpaMI'] = adata.obs['leiden'].astype(str).astype('category')
-    return adata, res
+    return adata, resolution
 
 
 # ================================================================================================
@@ -670,6 +643,7 @@ parser = argparse.ArgumentParser(description="Run SpaMI multimodal spatial clust
 parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
 parser.add_argument('--dropout_rate', type=float, default=0.15)
 parser.add_argument('--weight_decay', type=float, default=0.0)
+parser.add_argument('--leiden_res', type=float, default=1.0, help="Fixed Leiden resolution (official default: 1.0)")
 parser.add_argument('--dataset', type=int, default=None, help="Single dataset index to run (0 to 5)")
 parser.add_argument('--dataset_indices', type=int, nargs='+', default=None, help="List of dataset indices (e.g. --dataset_indices 0 1)")
 parser.add_argument('--seed', type=int, default=None, help="Single seed to run (e.g. --seed 2024)")
@@ -823,11 +797,10 @@ for dataset_idx in DATASET_INDICES:
 
         adata, chosen_res = cluster_spami(
             adata,
-            n_clusters=n_cluster,
+            resolution=args.leiden_res,
             use_pca=cluster_use_pca,
             n_comps=20,
             n_neighbors=50,
-            random_state=0,
         )
 
         duration_sec = round(time.time() - seed_start_time, 2)
