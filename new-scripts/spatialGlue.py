@@ -421,17 +421,11 @@ def mclust_R(adata, num_cluster, modelNames='EEE', used_obsm='emb_pca', random_s
         columns=[f'PC{i+1}' for i in range(X.shape[1])]
     )
 
-    # Use subset for initialization to dramatically speed up mclust for large datasets
-    subset_size = min(300, X.shape[0])
-    subset_indices = robjects.IntVector(list(np.random.choice(range(1, X.shape[0] + 1), subset_size, replace=False)))
-    init_list = robjects.ListVector({'subset': subset_indices})
-
     with localconverter(default_converter + pandas2ri.converter):
         res = rmclust(
             df,
             G=num_cluster,
-            modelNames=modelNames,
-            initialization=init_list
+            modelNames=modelNames
         )
 
     if hasattr(res, 'rx2'):
@@ -906,6 +900,7 @@ for dataset_idx in DATASET_INDICES:
     adata_omics2.obs['ground_truth'] = anno_df[gt_column]
 
     # ------------------ Preprocessing ------------------
+    fix_seed(2022)
     # RNA preprocessing
     sc.pp.filter_genes(adata_omics1, min_cells=10)
     if not dataset_name.startswith("10x"):
@@ -920,6 +915,7 @@ for dataset_idx in DATASET_INDICES:
 
     # Protein or ATAC preprocessing
     if dataset_name.startswith("10x"):
+        adata_omics2 = adata_omics2[adata_omics1.obs_names].copy()
         adata_omics1.obsm["feat"] = pca(
             adata_omics1_high,
             n_comps=adata_omics2.n_vars - 1
@@ -954,7 +950,7 @@ for dataset_idx in DATASET_INDICES:
 
     # ------------------ Seed Iterations ------------------
     dataset_results = []
-    n_ground_truth = adata_omics1.obs["ground_truth"].nunique()
+    n_ground_truth = int(adata_omics1.obs["ground_truth"].dropna().nunique())
     print(f"Number of ground truth classes: {n_ground_truth}")
     n_cluster = n_ground_truth
 
@@ -998,19 +994,21 @@ for dataset_idx in DATASET_INDICES:
         duration_sec = round(time.time() - seed_start_time, 2)
 
         # 4. Score Generating
-        y_true = adata.obs['ground_truth'].astype(str)
+        valid_mask = adata.obs['ground_truth'].notna()
+        y_true = adata.obs.loc[valid_mask, 'ground_truth'].astype(str)
+        y_pred_eval = adata.obs.loc[valid_mask, 'SpatialGlue'].astype(str)
         y_pred = adata.obs['SpatialGlue'].astype(str)
 
-        ari = adjusted_rand_score(y_true, y_pred)
-        nmi = normalized_mutual_info_score(y_true, y_pred)
-        ami = adjusted_mutual_info_score(y_true, y_pred)
-        homogeneity = homogeneity_score(y_true, y_pred)
-        v_measure = v_measure_score(y_true, y_pred)
+        ari = adjusted_rand_score(y_true, y_pred_eval)
+        nmi = normalized_mutual_info_score(y_true, y_pred_eval)
+        ami = adjusted_mutual_info_score(y_true, y_pred_eval)
+        homogeneity = homogeneity_score(y_true, y_pred_eval)
+        v_measure = v_measure_score(y_true, y_pred_eval)
 
-        # Calculate Silhouette Score using robust LabelEncoder
-        joint_feat = adata.obsm['SpatialGlue']
+        # Calculate Silhouette Score using robust LabelEncoder (filtered by valid_mask)
+        joint_feat = adata.obsm['SpatialGlue'][valid_mask.values]
         le = LabelEncoder()
-        y_pred_int = le.fit_transform(y_pred)
+        y_pred_int = le.fit_transform(y_pred_eval)
 
         try:
             sil_score = float(silhouette_score(joint_feat, y_pred_int))

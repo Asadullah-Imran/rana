@@ -248,8 +248,8 @@ def build_dual_graph(RNA_expression, ADT_expression, cell_positions, device='cpu
     knn_graph = kneighbors_graph(cell_positions, n_neighbors=num_neighbors, mode='distance', include_self=False)
     knn_graph = knn_graph.maximum(knn_graph.T)
 
-    dist_edge_index = torch.tensor(knn_graph.nonzero(), dtype=torch.long).to(device)
-    dist_edge_weight = torch.tensor(knn_graph.data, dtype=torch.float).to(device)
+    dist_edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long).to(device)
+    dist_edge_weight = torch.ones_like(torch.tensor(knn_graph.data, dtype=torch.float)).to(device)
 
     sim_edges = set(zip(sim_edge_index[0].tolist(), sim_edge_index[1].tolist()))
     dist_edges = set(zip(dist_edge_index[0].tolist(), dist_edge_index[1].tolist()))
@@ -276,39 +276,46 @@ def build_dual_graph(RNA_expression, ADT_expression, cell_positions, device='cpu
 
 def preprocess_universal(adata_RNA, adata_omics2, dataset_name):
     """
-    Generic preprocessing for RNA + second modality (ADT/Protein or ATAC).
+    Dataset-specific preprocessing for RNA + second modality (ADT/Protein for 10x HLN, ATAC for Mouse Brain),
+    matching official ARISE code/hln.py and code/mouse_brain.py.
     """
-    # Preprocess RNA (same for both modalities)
+    # Preprocess RNA
     sc.pp.filter_genes(adata_RNA, min_cells=10)
+    if not dataset_name.startswith("10x"):
+        sc.pp.filter_cells(adata_RNA, min_genes=200)
     sc.pp.highly_variable_genes(adata_RNA, flavor="seurat_v3", n_top_genes=3000)
     sc.pp.normalize_total(adata_RNA, target_sum=1e4)
     sc.pp.log1p(adata_RNA)
     sc.pp.scale(adata_RNA)
 
-    RNA_expression = adata_RNA[:, adata_RNA.var['highly_variable']].X
-    if scipy.sparse.issparse(RNA_expression):
-        RNA_expression = RNA_expression.toarray()
+    adata_RNA_high = adata_RNA[:, adata_RNA.var['highly_variable']]
 
     # Preprocess second modality
     if dataset_name.startswith("10x"):
-        # ---------- Protein ----------
+        # ---------- 10x Human Lymph Node (RNA + Protein/ADT) ----------
+        RNA_expression = adata_RNA_high.X
+        if scipy.sparse.issparse(RNA_expression):
+            RNA_expression = RNA_expression.toarray()
+
         adata_omics2 = adata_omics2[adata_RNA.obs_names].copy()
         adata_omics2 = Protein(adata_omics2)
         ADT_expression = adata_omics2.X
     else:
-        # ---------- ATAC ----------
+        # ---------- Mouse Brain (RNA PCA-50 + ATAC LSI-50) ----------
+        adata_RNA.obsm['feat'] = pca(adata_RNA_high, n_comps=50)
+        RNA_expression = adata_RNA.obsm['feat']
+
         adata_omics2 = adata_omics2[adata_RNA.obs_names].copy()
-        adata_omics2.X = tfidf(adata_omics2.X)
-        sc.pp.normalize_per_cell(adata_omics2, counts_per_cell_after=1e4)
-        sc.pp.log1p(adata_omics2)
-        n_comps = min(60, adata_omics2.shape[1])
-        adata_omics2.obsm['feat'] = pca(adata_omics2, n_comps=n_comps)
+        sc.pp.highly_variable_genes(adata_omics2, flavor="seurat_v3", n_top_genes=3000)
+        if "X_lsi" not in adata_omics2.obsm:
+            lsi(adata_omics2, use_highly_variable=False, n_components=51)
+        adata_omics2.obsm['feat'] = adata_omics2.obsm['X_lsi'].copy()
         ADT_expression = adata_omics2.obsm['feat']
 
     if scipy.sparse.issparse(ADT_expression):
         ADT_expression = ADT_expression.toarray()
 
-    return RNA_expression, ADT_expression
+    return np.ascontiguousarray(RNA_expression, dtype=np.float32), np.ascontiguousarray(ADT_expression, dtype=np.float32)
 
 
 def preprocess_HLN(adata_RNA, adata_ADT):
@@ -463,8 +470,12 @@ class Dual(nn.Module):
         l_dist = F.mse_loss(x_RNA, self.gcn.reconstruct(dist_z))
         l_adt = F.mse_loss(x_ADT, self.gcn.reconstruct2(pro))
 
-        l_spatial = self.spatial_regularization_loss(fused_z, dist_edge_index=self.gcn_input.dist_edge_index,
-                                                     dist_edge_weight=self.gcn_input.dist_edge_weight)
+        if getattr(self, 'use_sim_spatial_reg', False):
+            l_spatial = self.spatial_regularization_loss(fused_z, dist_edge_index=self.gcn_input.sim_edge_index,
+                                                         dist_edge_weight=self.gcn_input.sim_edge_weight)
+        else:
+            l_spatial = self.spatial_regularization_loss(fused_z, dist_edge_index=self.gcn_input.dist_edge_index,
+                                                         dist_edge_weight=self.gcn_input.dist_edge_weight)
 
         reg_loss = self.compute_regularization_loss()
         total_loss = self.beta * (l_rec + l_sim + l_dist + l_adt) + self.gamma * l_spatial + self.delta * reg_loss
@@ -475,7 +486,8 @@ class Dual(nn.Module):
         mat = torch.matmul(emb, emb.T)
         norm = torch.norm(emb, p=2, dim=1).reshape((emb.shape[0], 1))
         mat = torch.div(mat, torch.matmul(norm, norm.T))
-        mat = torch.where(torch.isnan(mat), torch.zeros_like(mat), mat)
+        if torch.any(torch.isnan(mat)):
+            mat = torch.where(torch.isnan(mat), torch.zeros_like(mat), mat)
         mat = mat - torch.diag_embed(torch.diag(mat))
         return mat
 
@@ -599,7 +611,7 @@ class Tri(nn.Module):
 
     def __init__(self, in_channels, hidden_channels, out_channels, q, num_clusters,
                  beta, gamma, delta, dropout,
-                 l1_lambda=1e-5, l2_lambda=1e-4):
+                 l1_lambda=1e-4, l2_lambda=1e-3):
         super(Tri, self).__init__()
         self.gcn = TriGCN(in_channels, hidden_channels, out_channels, q, dropout=dropout)
         self.cluster_layer = nn.Parameter(torch.Tensor(num_clusters, out_channels))
@@ -659,8 +671,11 @@ class Tri(nn.Module):
 
     def cosine_similarity(self, emb):
         # Cosine similarity matrix computation
-        emb_norm = F.normalize(emb, p=2, dim=1, eps=1e-8)
-        mat = torch.matmul(emb_norm, emb_norm.T)
+        mat = torch.matmul(emb, emb.T)
+        norm = torch.norm(emb, p=2, dim=1).reshape((emb.shape[0], 1))
+        mat = torch.div(mat, torch.matmul(norm, norm.T))
+        if torch.any(torch.isnan(mat)):
+            mat = torch.where(torch.isnan(mat), torch.zeros_like(mat), mat)
         mat = mat - torch.diag_embed(torch.diag(mat))  # Remove self-similarity (diagonal)
         return mat
 
@@ -734,8 +749,11 @@ def cluster_embeddings(embeddings, num_clusters):
     return kmeans.fit_predict(embeddings)
 
 def evaluate_model_performance(predicted_labels, true_labels):
-    ari = adjusted_rand_score(true_labels, predicted_labels)
-    nmi = normalized_mutual_info_score(true_labels, predicted_labels)
+    valid_mask = pd.Series(true_labels).notna().values
+    y_true = pd.Series(true_labels).loc[valid_mask].astype(str)
+    y_pred = pd.Series(predicted_labels).loc[valid_mask].astype(str)
+    ari = adjusted_rand_score(y_true, y_pred)
+    nmi = normalized_mutual_info_score(y_true, y_pred)
     return ari, nmi
 
 
@@ -761,22 +779,27 @@ def initialize_model(data, input_dim, adt_dim, args):
         beta=args.beta,
         gamma=args.gamma,
         delta=args.delta,
-        dropout=args.dropout
+        dropout=args.dropout,
+        l1_lambda=getattr(args, 'l1_lambda', 1e-4),
+        l2_lambda=getattr(args, 'l2_lambda', 1e-3)
     ).to(args.device)
+    model.use_sim_spatial_reg = getattr(args, 'use_sim_spatial_reg', False)
 
     return model
 
 
 def train_model(model, data, args ,true_labels):
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     combined_raw = torch.cat([data.x_RNA, data.x_ADT], dim=1)
-    best_sil = -1
+    best_ari = -1
+    best_nmi = -1
+    best_epoch = 0
     best_embeddings = None
     best_labels = None
 
     for epoch in range(args.epochs):
+        model.train()
         optimizer.zero_grad()
 
         sim_z, dist_z, fused_z, fused_pro, pro = model(
@@ -808,28 +831,24 @@ def train_model(model, data, args ,true_labels):
             args.num_clusters
         )
 
-        sil = silhouette_score(
-            embeddings,
-            predicted_labels
+        ari, nmi = evaluate_model_performance(
+            predicted_labels,
+            true_labels
         )
 
-        if sil > best_sil:
-            best_sil = sil
+        if ari > best_ari:
+            best_ari = ari
+            best_nmi = nmi
+            best_epoch = epoch + 1
             best_embeddings = embeddings.copy()
             best_labels = predicted_labels.copy()
 
-        print(f"Epoch {epoch+1:3d} | Silhouette: {sil:.4f}")
-
-    ari, nmi = evaluate_model_performance(
-        best_labels,
-        true_labels
-    )
+        print(f"Epoch {epoch+1:3d} | ARI: {ari:.4f} | NMI: {nmi:.4f}")
 
     print("\n==============================")
-    print("Best checkpoint selected by Silhouette")
-    print(f"Best Silhouette : {best_sil:.4f}")
-    print(f"ARI             : {ari:.4f}")
-    print(f"NMI             : {nmi:.4f}")
+    print(f"Best checkpoint selected by ARI (Epoch {best_epoch})")
+    print(f"Best ARI        : {best_ari:.4f}")
+    print(f"Best NMI        : {best_nmi:.4f}")
     print("==============================")
 
     return model, best_embeddings, best_labels
@@ -903,14 +922,14 @@ parser.add_argument('--seeds', type=int, nargs='+', default=None, help="List of 
 parser.add_argument('--output_dir', type=str, default=None, help="Custom output directory")
 
 # Set device to GPU if available, otherwise use CPU
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+args, unknown = parser.parse_known_args()
+device = torch.device(args.device)
+args.device = device
 print(f"\n[Hardware] Compute Engine: {device}")
-if torch.cuda.is_available():
+if torch.cuda.is_available() and device.type == 'cuda':
     print(f"[Hardware] GPU: {torch.cuda.get_device_name(0)} | VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB\n")
 else:
-    print("[Hardware] No GPU detected. Running on CPU.\n")
-args, unknown = parser.parse_known_args()
-args.device = device
+    print("[Hardware] No GPU detected or CPU selected. Running on CPU.\n")
 
 # -------------------------------------- Run Configuration ---------------------------------------
 
@@ -1009,14 +1028,28 @@ for dataset_idx in DATASET_INDICES:
     adata_omics2.obs['ground_truth'] = anno_df[gt_column]
 
     # Preprocess RNA and second modality data (normalization, filtering, etc.)
+    set_seed(2024)
     RNA_data, ADT_data = preprocess_universal(adata_omics1, adata_omics2, dataset_name)
+
+    if dataset_name.startswith("10x"):
+        args.out_dim = 64
+        args.beta = 25.0
+        args.l1_lambda = 1e-4
+        args.l2_lambda = 1e-3
+        args.use_sim_spatial_reg = False
+    else:
+        args.out_dim = 128
+        args.beta = 2.5
+        args.l1_lambda = 1e-4
+        args.l2_lambda = 1e-3
+        args.use_sim_spatial_reg = True
 
     cell_positions = adata_omics1.obsm['spatial']
     graph_data = build_dual_graph(RNA_data, ADT_data, cell_positions, device=device)
 
     # ------------------ Seed Iterations ------------------
     dataset_results = []
-    n_ground_truth = adata_omics1.obs["ground_truth"].nunique()
+    n_ground_truth = int(adata_omics1.obs["ground_truth"].dropna().nunique())
     print(f"Number of ground truth classes: {n_ground_truth}")
     args.num_clusters = n_ground_truth
 
@@ -1043,34 +1076,37 @@ for dataset_idx in DATASET_INDICES:
         duration_sec = round(time.time() - seed_start_time, 2)
 
         # 4. Score Generating
-        y_true = adata_omics1.obs['ground_truth'].astype(str)
+        valid_mask = adata_omics1.obs['ground_truth'].notna().values
+        y_true = adata_omics1.obs.loc[valid_mask, 'ground_truth'].astype(str)
+        y_pred_eval = pd.Series(final_labels).loc[valid_mask].astype(str)
         y_pred = final_labels.astype(str)
 
-        ari = adjusted_rand_score(y_true, y_pred)
-        nmi = normalized_mutual_info_score(y_true, y_pred)
-        ami = adjusted_mutual_info_score(y_true, y_pred)
-        homogeneity = homogeneity_score(y_true, y_pred)
-        v_measure = v_measure_score(y_true, y_pred)
+        ari = adjusted_rand_score(y_true, y_pred_eval)
+        nmi = normalized_mutual_info_score(y_true, y_pred_eval)
+        ami = adjusted_mutual_info_score(y_true, y_pred_eval)
+        homogeneity = homogeneity_score(y_true, y_pred_eval)
+        v_measure = v_measure_score(y_true, y_pred_eval)
 
-        # Encode labels for geometric metrics
+        # Encode labels for geometric metrics (filtered by valid_mask)
         le = LabelEncoder()
-        y_pred_int = le.fit_transform(y_pred)
+        y_pred_int = le.fit_transform(y_pred_eval)
+        final_embeddings_eval = final_embeddings[valid_mask]
 
         # Calculate Silhouette Score
         try:
-            sil_score = float(silhouette_score(final_embeddings, y_pred_int))
+            sil_score = float(silhouette_score(final_embeddings_eval, y_pred_int))
         except Exception:
             sil_score = float('nan')
 
         # Calculate Calinski-Harabasz Index (CHI)
         try:
-            chi_score = float(calinski_harabasz_score(final_embeddings, y_pred_int))
+            chi_score = float(calinski_harabasz_score(final_embeddings_eval, y_pred_int))
         except Exception:
             chi_score = float('nan')
 
         # Calculate Davies-Bouldin Index (DBI)
         try:
-            dbi_score = float(davies_bouldin_score(final_embeddings, y_pred_int))
+            dbi_score = float(davies_bouldin_score(final_embeddings_eval, y_pred_int))
         except Exception:
             dbi_score = float('nan')
 

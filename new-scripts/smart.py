@@ -375,7 +375,7 @@ def pca(adata, use_reps=None, n_comps=10):
         else:
             feat_pca = pca.fit_transform(adata.X)
 
-    return np.ascontiguousarray(feat_pca, dtype=np.float32)
+    return np.ascontiguousarray(feat_pca)
 
 
 def mclust_R(adata, num_cluster, modelNames='EEE', used_obsm='emb_pca', random_seed=2020):
@@ -410,17 +410,11 @@ def mclust_R(adata, num_cluster, modelNames='EEE', used_obsm='emb_pca', random_s
         columns=[f'PC{i+1}' for i in range(X.shape[1])]
     )
 
-    # Use subset for initialization to dramatically speed up mclust for large datasets
-    subset_size = min(300, X.shape[0])
-    subset_indices = robjects.IntVector(list(np.random.choice(range(1, X.shape[0] + 1), subset_size, replace=False)))
-    init_list = robjects.ListVector({'subset': subset_indices})
-
     with localconverter(default_converter + pandas2ri.converter):
         res = rmclust(
             df,
             G=num_cluster,
-            modelNames=modelNames,
-            initialization=init_list
+            modelNames=modelNames
         )
 
     # mclust_res = np.array(res.rx2("classification"))
@@ -830,11 +824,11 @@ class SMART(torch.nn.Module):
         out_dim = hidden_dims[-1]
 
         # One encoder per modality
-        self.encoders = [Conv_Encoder(in_dim, out_dim).to(device) for in_dim in hidden_dims[:-1]]
+        self.encoders = nn.ModuleList([Conv_Encoder(in_dim, out_dim).to(device) for in_dim in hidden_dims[:-1]])
         self.fc = nn.Linear((len(hidden_dims) - 1) * out_dim, out_dim)
 
         # One decoder per modality
-        self.decoders = [Conv_Decoder(out_dim, in_dim).to(device) for in_dim in hidden_dims[:-1]]
+        self.decoders = nn.ModuleList([Conv_Decoder(out_dim, in_dim).to(device) for in_dim in hidden_dims[:-1]])
 
     def forward(self, features, edge_indexs):
         """
@@ -1363,6 +1357,7 @@ for dataset_idx in DATASET_INDICES:
     adata_omics2.obs['ground_truth'] = anno_df[gt_column]
 
     # ------------------ Preprocessing ------------------
+    set_seed(2024)
     # RNA preprocessing
     sc.pp.filter_genes(adata_omics1, min_cells=10)
     sc.pp.highly_variable_genes(adata_omics1, flavor="seurat_v3", n_top_genes=3000)
@@ -1379,16 +1374,22 @@ for dataset_idx in DATASET_INDICES:
         pt.pp.clr(adata_omics2)
         sc.pp.scale(adata_omics2)
         adata_omics2.obsm['feat'] = pca(adata_omics2, n_comps=30)
+        spatial_n_neighbors = 6
+        train_lr = 5e-3
+        train_weight_decay = 1e-6
     else:
         adata_omics2 = adata_omics2[adata_omics1.obs_names].copy()
         ac.pp.tfidf(adata_omics2, scale_factor=1e4)
         sc.pp.normalize_per_cell(adata_omics2, counts_per_cell_after=1e4)
         sc.pp.log1p(adata_omics2)
         adata_omics2.obsm['feat'] = pca(adata_omics2, n_comps=60)
+        spatial_n_neighbors = 4
+        train_lr = 1e-3
+        train_weight_decay = 1e-5
 
     # ------------------ Spatial Neighbor Graph Construction ------------------
-    Cal_Spatial_Net(adata_omics1, model="KNN", n_neighbors=6)
-    Cal_Spatial_Net(adata_omics2, model="KNN", n_neighbors=6)
+    Cal_Spatial_Net(adata_omics1, model="KNN", n_neighbors=spatial_n_neighbors)
+    Cal_Spatial_Net(adata_omics2, model="KNN", n_neighbors=spatial_n_neighbors)
 
     adata_list = [adata_omics1, adata_omics2]
     x = [torch.FloatTensor(np.ascontiguousarray(adata.obsm["feat"], dtype=np.float32)).to(device) for adata in adata_list]
@@ -1396,7 +1397,7 @@ for dataset_idx in DATASET_INDICES:
 
     # ------------------ Seed Iterations ------------------
     dataset_results = []
-    n_ground_truth = adata_omics1.obs["ground_truth"].nunique()
+    n_ground_truth = int(adata_omics1.obs["ground_truth"].dropna().nunique())
     print(f"Number of ground truth classes: {n_ground_truth}")
     n_cluster = n_ground_truth
 
@@ -1428,8 +1429,8 @@ for dataset_idx in DATASET_INDICES:
             weights=[1, 1, 1, 1],
             emb_dim=64,
             n_epochs=300,
-            lr=5e-3,
-            weight_decay=1e-6,
+            lr=train_lr,
+            weight_decay=train_weight_decay,
             device=device,
             window_size=10,
             slope=1e-4
@@ -1448,18 +1449,20 @@ for dataset_idx in DATASET_INDICES:
         if 'anno' not in adata.obs.columns and 'ground_truth' in adata.obs.columns:
             adata.obs['anno'] = adata.obs['ground_truth']
 
-        y_true = adata.obs['ground_truth'].astype(str)
+        valid_mask = adata.obs['ground_truth'].notna()
+        y_true = adata.obs.loc[valid_mask, 'ground_truth'].astype(str)
+        y_pred_eval = adata.obs.loc[valid_mask, 'SMART'].astype(str)
         y_pred = adata.obs['SMART'].astype(str)
 
-        ari = adjusted_rand_score(y_true, y_pred)
-        nmi = normalized_mutual_info_score(y_true, y_pred)
-        ami = adjusted_mutual_info_score(y_true, y_pred)
-        homogeneity = homogeneity_score(y_true, y_pred)
-        v_measure = v_measure_score(y_true, y_pred)
+        ari = adjusted_rand_score(y_true, y_pred_eval)
+        nmi = normalized_mutual_info_score(y_true, y_pred_eval)
+        ami = adjusted_mutual_info_score(y_true, y_pred_eval)
+        homogeneity = homogeneity_score(y_true, y_pred_eval)
+        v_measure = v_measure_score(y_true, y_pred_eval)
 
-        joint_feat = adata.obsm['SMART']
+        joint_feat = adata.obsm['SMART'][valid_mask.values]
         le = LabelEncoder()
-        y_pred_int = le.fit_transform(y_pred)
+        y_pred_int = le.fit_transform(y_pred_eval)
 
         # Calculate Silhouette Score
         try:
