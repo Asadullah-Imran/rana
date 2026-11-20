@@ -64,8 +64,9 @@ def seed(seed_val=1000):
     torch.manual_seed(seed_val)
     torch.cuda.manual_seed(seed_val)
     torch.cuda.manual_seed_all(seed_val)
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     os.environ['PYTHONHASHSEED'] = str(seed_val)
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
 
@@ -336,6 +337,26 @@ def preprocessing(adata_omics1, adata_omics2, datatype='SPOTS', n_neighbors=8, f
         sc.pp.pca(adata_omics2, n_comps=adata_omics2.n_vars - 1)
         adata_omics2.obsm['feat'] = adata_omics2.obsm['X_pca'].copy()
 
+    elif datatype == 'Stereo-CITE-seq':
+        # RNA
+        sc.pp.filter_genes(adata_omics1, min_cells=10)
+        sc.pp.filter_cells(adata_omics1, min_genes=80)
+        sc.pp.highly_variable_genes(adata_omics1, flavor="seurat_v3", n_top_genes=3000)
+        sc.pp.normalize_total(adata_omics1, target_sum=1e6)
+        sc.pp.log1p(adata_omics1)
+        sc.pp.scale(adata_omics1)
+
+        adata_omics1_high = adata_omics1[:, adata_omics1.var['highly_variable']].copy()
+        sc.pp.pca(adata_omics1_high, n_comps=adata_omics2.n_vars - 1)
+        adata_omics1.obsm['feat'] = adata_omics1_high.obsm['X_pca']
+
+        # Protein / ADT
+        adata_omics2 = adata_omics2[adata_omics1.obs_names].copy()
+        adata_omics2 = clr_normalize_each_cell(adata_omics2)
+        sc.pp.scale(adata_omics2)
+        sc.pp.pca(adata_omics2, n_comps=adata_omics2.n_vars - 1)
+        adata_omics2.obsm['feat'] = adata_omics2.obsm['X_pca'].copy()
+
     elif datatype == 'Spatial-ATAC-RNA-seq':
         # RNA
         sc.pp.filter_genes(adata_omics1, min_cells=10)
@@ -388,27 +409,19 @@ class ForestFire:
 
     def forestfire(self, G, size):
         list_nodes = list(G.nodes())
-        target_size = min(size, len(list_nodes))
-        if target_size >= len(list_nodes):
-            return G
-
-        self.G1 = nx.Graph()
         dictt = set()
         random_node = random.sample(list_nodes, 1)[0]
         q = set()
         q.add(random_node)
-        while len(self.G1.nodes()) < target_size:
+        while len(self.G1.nodes()) < size:
             if len(q) > 0:
                 initial_node = q.pop()
                 if initial_node not in dictt:
                     dictt.add(initial_node)
                     neighbours = list(G.neighbors(initial_node))
-                    if len(neighbours) == 0:
-                        self.G1.add_node(initial_node)
-                        continue
                     n_burn = random.randint(1, len(neighbours))
                     for x in neighbours[:n_burn]:
-                        if len(self.G1.nodes()) < target_size:
+                        if len(self.G1.nodes()) < size:
                             self.G1.add_edge(initial_node, x)
                             q.add(x)
                         else:
@@ -444,7 +457,7 @@ class CrossCLR_onlyIntraModality(nn.Module):
         self.device = device
 
     def compute_loss(self, logits, mask):
-        return -torch.log((F.softmax(logits, dim=1) * mask).sum(1) + 1e-12)
+        return -torch.log((F.softmax(logits, dim=1) * mask).sum(1))
 
     def _get_positive_mask(self, batch_size):
         diag = np.eye(batch_size)
@@ -1020,14 +1033,14 @@ class SCIGMA:
         for epoch in tqdm(range(epochs)):
             if epoch % 2 == 0:
                 sample = sampler.forestfire(self.combined_graph_1_sp, self.batch_size)
-                indices = torch.tensor(sorted(set(sample.nodes()).intersection(self.connectivities)), dtype=torch.long)
+                indices = torch.tensor(list(set([n for n in sample]).intersection(self.connectivities)), dtype=torch.long)
                 edge1 = torch.index_select(torch.index_select(self.combined_graph_1, 0, indices), 1, indices).coalesce()
                 feat1 = self.features_omics1[indices.to(self.device)]
                 edge2 = torch.index_select(torch.index_select(self.combined_graph_2, 0, indices), 1, indices).coalesce()
                 feat2 = self.features_omics2[indices.to(self.device)]
             else:
                 sample = sampler.forestfire(self.combined_graph_2_sp, self.batch_size)
-                indices = torch.tensor(sorted(set(sample.nodes()).intersection(self.connectivities)), dtype=torch.long)
+                indices = torch.tensor(list(set([n for n in sample]).intersection(self.connectivities)), dtype=torch.long)
                 edge2 = torch.index_select(torch.index_select(self.combined_graph_2, 0, indices), 1, indices).coalesce()
                 feat2 = self.features_omics2[indices.to(self.device)]
                 edge1 = torch.index_select(torch.index_select(self.combined_graph_1, 0, indices), 1, indices).coalesce()
@@ -1314,7 +1327,7 @@ for dataset_idx in DATASET_INDICES:
                 n_clusters=n_cluster,
                 method='mclust',
                 use_pca=False,
-                random_seed=seed_val,
+                random_seed=1000,
             )
         else:
             clustering(
