@@ -88,11 +88,32 @@ def tfidf(X):
         return tf * idf
 
 
-def lsi(adata: anndata.AnnData, n_components=20, use_highly_variable=False, **kwargs):
+def lsi(adata: anndata.AnnData, n_components=20, use_highly_variable=True, **kwargs):
     """LSI analysis (following the Seurat v3 approach, utils.py:37-53)."""
+    adata_lsi = adata.copy()
+    if scipy.sparse.issparse(adata_lsi.X):
+        adata_lsi.X = adata_lsi.X.tocsr(copy=True)
+        adata_lsi.X.data = np.nan_to_num(
+            np.asarray(adata_lsi.X.data, dtype=np.float64),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).astype(np.float32)
+    else:
+        adata_lsi.X = np.nan_to_num(
+            np.asarray(adata_lsi.X, dtype=np.float64),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+
     if use_highly_variable:
-        sc.pp.highly_variable_genes(adata, flavor='seurat', n_top_genes=3000)
-    adata_use = adata[:, adata.var["highly_variable"]] if use_highly_variable else adata
+        sc.pp.highly_variable_genes(adata_lsi, flavor='seurat', n_top_genes=3000)
+    adata_use = (
+        adata_lsi[:, adata_lsi.var["highly_variable"]]
+        if use_highly_variable
+        else adata_lsi
+    )
     X = adata_use.X.copy()
     if scipy.sparse.issparse(X):
         X = X.tocsr()
@@ -395,7 +416,7 @@ def preprocessing(adata_omics1, adata_omics2, datatype='SPOTS', n_neighbors=8, f
         adata_omics2 = adata_omics2[adata_omics1.obs_names].copy()
         sc.pp.highly_variable_genes(adata_omics2, flavor="seurat_v3", n_top_genes=3000)
         if 'X_lsi' not in adata_omics2.obsm:
-            lsi(adata_omics2, n_components=50, use_highly_variable=False)
+            lsi(adata_omics2, n_components=50)
         adata_omics2.obsm['feat'] = adata_omics2.obsm['X_lsi'].copy()
 
     print("Constructing spatial graphs")
@@ -709,7 +730,7 @@ class GCN(nn.Module):
 
     def forward(self, x, adj):
         x = F.leaky_relu(self.gc1(x, adj))
-        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout)
         x = self.gc2(x, adj)
         return x
 
@@ -725,11 +746,11 @@ class GCAT_Encoder(nn.Module):
 
     def forward(self, x, adj, edge):
         x = F.leaky_relu(self.gc1([x, edge])[0])
-        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout)
         x = F.leaky_relu(self.gc2(x, adj))
-        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout)
         x = F.leaky_relu(self.gc3([x, edge])[0])
-        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout)
         x = self.gc4(x, adj)
         return x
 
@@ -745,11 +766,11 @@ class GCAT_Decoder(nn.Module):
 
     def forward(self, x, adj, edge):
         x = F.leaky_relu(self.gc1(x, adj))
-        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout)
         x = F.leaky_relu(self.gc2([x, edge])[0])
-        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout)
         x = F.leaky_relu(self.gc3(x, adj))
-        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout)
         x = self.gc4([x, edge])[0]
         return x
 
@@ -1263,6 +1284,13 @@ for dataset_idx in DATASET_INDICES:
     adata_omics1.var_names_make_unique()
     adata_omics2.var_names_make_unique()
 
+    if scigma_datatype == 'SPOTS':
+        for adata in (adata_omics1, adata_omics2):
+            spatial = np.asarray(adata.obsm['spatial'])
+            spatial = np.rot90(np.rot90(np.rot90(spatial).T).T).T
+            spatial[:, 1] = -1 * spatial[:, 1]
+            adata.obsm['spatial'] = spatial
+
     anno_df = pd.read_csv(annotation_path, index_col=0)
     adata_omics1.obs['ground_truth'] = anno_df[gt_column]
     adata_omics2.obs['ground_truth'] = anno_df[gt_column]
@@ -1357,7 +1385,6 @@ for dataset_idx in DATASET_INDICES:
                 start=0.1,
                 end=2.0,
                 increment=0.01,
-                use_pca=False,
             )
 
         duration_sec = round(time.time() - seed_start_time, 2)

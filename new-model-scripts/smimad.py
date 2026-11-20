@@ -692,11 +692,11 @@ def pre_process_anndata(adata_omics1, adata_omics2, data_type='10x',
 def clustering(adata, num_cluster=5, used_obsm='fused_latent', modelNames='EEE', random_seed=2024):
     """
     Clustering using the R mclust algorithm (official utils.py:258-274,
-    using rpy2 localconverter for Python 3.11+ / rpy2 >= 3.5 compatibility).
+    using an explicit R matrix to avoid mclust dimnames failures with newer
+    R/mclust combinations.
     """
     import rpy2.robjects as robjects
-    from rpy2.robjects import numpy2ri
-    from rpy2.robjects.conversion import localconverter
+    from rpy2.robjects.vectors import FloatVector, StrVector
 
     robjects.r.library("mclust")
     r_random_seed = robjects.r['set.seed']
@@ -705,8 +705,32 @@ def clustering(adata, num_cluster=5, used_obsm='fused_latent', modelNames='EEE',
     np.random.seed(random_seed)
 
     X = np.array(adata.obsm[used_obsm], dtype=np.float64)
-    with localconverter(numpy2ri.converter):
-        res = rmclust(numpy2ri.numpy2rpy(X), G=num_cluster, modelNames=modelNames)
+    if X.ndim != 2:
+        raise ValueError(f"{used_obsm} must be a two-dimensional array, got shape {X.shape}")
+    if not np.isfinite(X).all():
+        raise ValueError(f"{used_obsm} contains NaN or infinite values")
+    if X.shape[0] <= num_cluster:
+        raise ValueError(
+            f"mclust requires more observations than clusters: "
+            f"{X.shape[0]} observations, {num_cluster} clusters"
+        )
+
+    # Construct the matrix in R's column-major order and set names before
+    # Mclust runs its input validation. This avoids a dimnames assignment
+    # failure reported with mclust 6.1.4 and newer R/rpy2 combinations.
+    r_data = robjects.r.matrix(
+        FloatVector(X.ravel(order="F")),
+        nrow=X.shape[0],
+        ncol=X.shape[1],
+    )
+    set_colnames = robjects.r(
+        "function(x, names) { colnames(x) <- names; x }"
+    )
+    r_data = set_colnames(
+        r_data,
+        StrVector([f"V{i}" for i in range(1, X.shape[1] + 1)]),
+    )
+    res = rmclust(r_data, num_cluster, modelNames)
 
     mclust_res = np.array(res.rx2('classification')) if hasattr(res, 'rx2') else np.array(res[-2])
 
