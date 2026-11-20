@@ -573,7 +573,25 @@ def pre_process_anndata(adata_omics1, adata_omics2, data_type='10x',
     adata_omics1.var_names_make_unique()
     adata_omics2.var_names_make_unique()
 
-    if data_type == 'MISAR-seq':
+    if data_type in ('Simulation', 'spatial‐CITE‐seq', 'Stereo-CITE-seq'):
+        if data_type == 'Simulation':
+            sc.pp.highly_variable_genes(adata_omics1, flavor="seurat_v3", n_top_genes=3000)
+            adata_omics1 = adata_omics1[:, adata_omics1.var.highly_variable].copy()
+
+        adata_omics2 = clr_normalize_each_cell(adata_omics2)
+        sc.pp.scale(adata_omics2)
+
+        adata_omics1, adata_omics2 = construct_neighbor_graph(
+            adata_omics1, adata_omics2,
+            omics1_comps=adata_omics2.shape[1] - 1,
+            omics2_comps=adata_omics2.shape[1] - 1,
+            spatial_neighbors=spatial_neighbors,
+            omics1_neighbors=omics1_neighbors,
+            omics2_neighbors=omics2_neighbors,
+            radius=radius,
+        )
+
+    elif data_type == 'MISAR-seq':
         sc.pp.highly_variable_genes(adata_omics1, flavor="seurat_v3", n_top_genes=3000)
         sc.pp.highly_variable_genes(adata_omics2, flavor="seurat_v3", n_top_genes=3000)
 
@@ -587,6 +605,54 @@ def pre_process_anndata(adata_omics1, adata_omics2, data_type='10x',
             adata_omics2_type='ATAC',
             omics1_comps=50,
             omics2_comps=50,
+            spatial_neighbors=spatial_neighbors,
+            omics1_neighbors=omics1_neighbors,
+            omics2_neighbors=omics2_neighbors,
+            radius=radius,
+        )
+
+    elif data_type == 'Spatial-epigenome-transcriptome':
+        sc.pp.filter_genes(adata_omics1, min_cells=1)
+        sc.pp.filter_cells(adata_omics1, min_genes=1)
+        sc.pp.highly_variable_genes(adata_omics1, flavor="seurat_v3", n_top_genes=3000)
+        sc.pp.normalize_total(adata_omics1, target_sum=1e4)
+        sc.pp.log1p(adata_omics1)
+        sc.pp.scale(adata_omics1)
+
+        adata_omics1_high = adata_omics1[:, adata_omics1.var['highly_variable']]
+        adata_omics1.obsm['feat'] = pca(adata_omics1_high, n_comps=50)
+
+        adata_omics2 = adata_omics2[adata_omics1.obs_names].copy()
+        if 'X_lsi' not in adata_omics2.obsm:
+            sc.pp.highly_variable_genes(adata_omics2, flavor="seurat_v3", n_top_genes=3000)
+            lsi(adata_omics2, use_highly_variable=False, n_components=51)
+        adata_omics2.obsm['feat'] = adata_omics2.obsm['X_lsi'].copy()
+
+        adata_omics1, adata_omics2 = construct_neighbor_graph(
+            adata_omics1, adata_omics2,
+            use_pca=False,
+            spatial_neighbors=spatial_neighbors,
+            omics1_neighbors=omics1_neighbors,
+            omics2_neighbors=omics2_neighbors,
+            radius=radius,
+        )
+
+    elif data_type in ('SPOTS', 'DBiT-seq', 'DBiT‑seq'):
+        sc.pp.filter_genes(adata_omics1, min_cells=10)
+        sc.pp.highly_variable_genes(adata_omics1, flavor="seurat_v3", n_top_genes=3000)
+        sc.pp.normalize_total(adata_omics1, target_sum=1e4)
+        sc.pp.log1p(adata_omics1)
+        sc.pp.scale(adata_omics1)
+        adata_omics1_high = adata_omics1[:, adata_omics1.var['highly_variable']]
+        adata_omics1.obsm['feat'] = pca(adata_omics1_high, n_comps=adata_omics2.n_vars - 1)
+
+        adata_omics2 = clr_normalize_each_cell(adata_omics2)
+        sc.pp.scale(adata_omics2)
+        adata_omics2.obsm['feat'] = pca(adata_omics2, n_comps=adata_omics2.n_vars - 1)
+
+        adata_omics1, adata_omics2 = construct_neighbor_graph(
+            adata_omics1, adata_omics2,
+            use_pca=False,
             spatial_neighbors=spatial_neighbors,
             omics1_neighbors=omics1_neighbors,
             omics2_neighbors=omics2_neighbors,
@@ -629,27 +695,20 @@ def clustering(adata, num_cluster=5, used_obsm='fused_latent', modelNames='EEE',
     using rpy2 localconverter for Python 3.11+ / rpy2 >= 3.5 compatibility).
     """
     import rpy2.robjects as robjects
-    from rpy2.robjects import default_converter, pandas2ri
+    from rpy2.robjects import numpy2ri
     from rpy2.robjects.conversion import localconverter
 
-    np.random.seed(random_seed)
     robjects.r.library("mclust")
     r_random_seed = robjects.r['set.seed']
     r_random_seed(random_seed)
     rmclust = robjects.r['Mclust']
+    np.random.seed(random_seed)
 
     X = np.array(adata.obsm[used_obsm], dtype=np.float64)
-    df = pd.DataFrame(X, columns=[f'Z{i+1}' for i in range(X.shape[1])])
+    with localconverter(numpy2ri.converter):
+        res = rmclust(numpy2ri.numpy2rpy(X), G=num_cluster, modelNames=modelNames)
 
-    with localconverter(default_converter + pandas2ri.converter):
-        res = rmclust(df, G=num_cluster, modelNames=modelNames)
-
-    if hasattr(res, 'rx2'):
-        mclust_res = np.array(res.rx2('classification'))
-    elif hasattr(res, 'getbyname'):
-        mclust_res = np.array(res.getbyname('classification'))
-    else:
-        mclust_res = np.array(res['classification'])
+    mclust_res = np.array(res.rx2('classification')) if hasattr(res, 'rx2') else np.array(res[-2])
 
     adata.obs['mclust'] = mclust_res.astype('int')
     return adata
@@ -741,7 +800,7 @@ def adt_loss(mean, target):
 # ================================================================================================
 
 def train_smimad(adata_omics1, adata_omics2, n_cluster=5, Epoch=5000, lr=0.001,
-                 weight_decay=0.1, device='cuda:0', other_type='adt', random_seed=2024):
+                 weight_decay=0.1, device='cuda:0', other_type='adt'):
     common = 'feat' in adata_omics1.obsm
     if not common:
         if scipy.sparse.issparse(adata_omics1.X):
@@ -852,7 +911,7 @@ def train_smimad(adata_omics1, adata_omics2, n_cluster=5, Epoch=5000, lr=0.001,
     adata_out.obsm['attention_weights1'] = attention_weights1.detach().cpu().numpy()
     adata_out.obsm['attention_weights2'] = attention_weights2.detach().cpu().numpy()
     adata_out.obsm['attention_weights_fusion'] = attention_weights_fusion.detach().cpu().numpy()
-    clustering(adata_out, num_cluster=n_cluster, used_obsm='fused_latent', random_seed=random_seed)
+    clustering(adata_out, num_cluster=n_cluster, used_obsm='fused_latent', random_seed=2024)
     adata_out.obs['smiMAD'] = adata_out.obs['mclust'].astype(str).astype('category')
     return adata_out
 
@@ -866,6 +925,7 @@ parser.add_argument('--device', type=str, default='cuda:0' if torch.cuda.is_avai
 parser.add_argument('--lr', type=float, default=0.001)
 parser.add_argument('--weight_decay', type=float, default=0.1)
 parser.add_argument('--epoch', type=int, default=None, help="Override dataset-specific official epoch count")
+parser.add_argument('--n_cluster', type=int, default=None, help="Official cluster count; derived from annotation when omitted")
 parser.add_argument('--dataset', type=int, default=None, help="Single dataset index to run (0 to 5)")
 parser.add_argument('--dataset_indices', type=int, nargs='+', default=None, help="List of dataset indices (e.g. --dataset_indices 0 1)")
 parser.add_argument('--seed', type=int, default=None, help="Single seed to run (e.g. --seed 2024)")
@@ -1001,7 +1061,9 @@ for dataset_idx in DATASET_INDICES:
     dataset_results = []
     n_ground_truth = int(adata_omics2.obs["ground_truth"].dropna().nunique())
     print(f"Number of ground truth classes: {n_ground_truth}")
-    n_cluster = n_ground_truth
+    n_cluster = args.n_cluster if args.n_cluster is not None else n_ground_truth
+    if args.n_cluster is not None:
+        print(f"Using explicit official cluster count: {n_cluster}")
 
     best_ari = -1.0
     best_seed = None
@@ -1025,7 +1087,6 @@ for dataset_idx in DATASET_INDICES:
             weight_decay=args.weight_decay,
             device=device,
             other_type=other_type,
-            random_seed=seed_val,
         )
 
         duration_sec = round(time.time() - seed_start_time, 2)

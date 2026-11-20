@@ -88,15 +88,33 @@ def tfidf(X):
         return tf * idf
 
 
-def lsi(adata: anndata.AnnData, n_components=20, use_highly_variable=True, **kwargs):
+def lsi(adata: anndata.AnnData, n_components=20, use_highly_variable=False, **kwargs):
     """LSI analysis (following the Seurat v3 approach, utils.py:37-53)."""
     if use_highly_variable:
         sc.pp.highly_variable_genes(adata, flavor='seurat', n_top_genes=3000)
     adata_use = adata[:, adata.var["highly_variable"]] if use_highly_variable else adata
-    X = tfidf(adata_use.X)
+    X = adata_use.X.copy()
+    if scipy.sparse.issparse(X):
+        X = X.tocsr()
+        X.data = np.nan_to_num(
+            np.asarray(X.data, dtype=np.float64),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).astype(np.float32)
+    else:
+        X = np.nan_to_num(
+            np.asarray(X, dtype=np.float64),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+    X = tfidf(X)
     X_norm = sklearn.preprocessing.Normalizer(norm="l1").fit_transform(X)
     X_norm = np.log1p(X_norm * 1e4)
+    X_norm = np.nan_to_num(X_norm, nan=0.0, posinf=0.0, neginf=0.0)
     X_lsi = sklearn.utils.extmath.randomized_svd(X_norm, n_components, **kwargs)[0]
+    X_lsi = np.nan_to_num(X_lsi, nan=0.0, posinf=0.0, neginf=0.0)
     X_lsi -= X_lsi.mean(axis=1, keepdims=True)
     X_lsi_std = X_lsi.std(axis=1, ddof=1, keepdims=True)
     X_lsi_std = np.where(X_lsi_std == 0, 1.0, X_lsi_std)
@@ -377,7 +395,7 @@ def preprocessing(adata_omics1, adata_omics2, datatype='SPOTS', n_neighbors=8, f
         adata_omics2 = adata_omics2[adata_omics1.obs_names].copy()
         sc.pp.highly_variable_genes(adata_omics2, flavor="seurat_v3", n_top_genes=3000)
         if 'X_lsi' not in adata_omics2.obsm:
-            lsi(adata_omics2, n_components=50)
+            lsi(adata_omics2, n_components=50, use_highly_variable=False)
         adata_omics2.obsm['feat'] = adata_omics2.obsm['X_lsi'].copy()
 
     print("Constructing spatial graphs")
