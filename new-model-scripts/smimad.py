@@ -495,6 +495,8 @@ def construct_adjacency_by_features(adata, n_neighbors=2, use_pca=True, n_comps=
         include_self=False,
     ).toarray()
 
+    # Zero-variance cells (e.g. spots with 0 counts in top HVGs) yield NaN correlation distances
+    adj = np.nan_to_num(adj, nan=0.0, posinf=1.0, neginf=0.0)
     adj = adj + adj.T
     adata.obsm['adj_feature'] = np.where(adj > 1, 1, adj)
     return adata
@@ -842,6 +844,7 @@ def train_smimad(adata_omics1, adata_omics2, n_cluster=5, Epoch=5000, lr=0.001,
                 ATAC = adata_omics2.X.toarray().copy()
             else:
                 ATAC = np.asarray(adata_omics2.X).copy()
+            ATAC = np.nan_to_num(ATAC, nan=0.0, posinf=0.0, neginf=0.0)
             ATAC[ATAC != 0] = 1
             ATAC = torch.tensor(ATAC).float().to(device)
     else:
